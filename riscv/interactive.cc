@@ -3,7 +3,7 @@
 #include "decode.h"
 #include "disasm.h"
 #include "sim.h"
-#include "htif.h"
+#include "soc.h"
 #include <sys/mman.h>
 #include <termios.h>
 #include <map>
@@ -48,7 +48,7 @@ static std::string readline(int fd)
 
 void sim_t::interactive()
 {
-  while (!htif->done())
+  while (!soc->done())
   {
     std::cerr << ": " << std::flush;
     std::string s = readline(2);
@@ -106,7 +106,7 @@ void sim_t::interactive_run(const std::string& cmd, const std::vector<std::strin
   size_t steps = args.size() ? atoll(args[0].c_str()) : -1;
   ctrlc_pressed = false;
   set_procs_debug(noisy);
-  for (size_t i = 0; i < steps && !ctrlc_pressed && !htif->done(); i++)
+  for (size_t i = 0; i < steps && !ctrlc_pressed && !soc->done(); i++)
     step(1);
 }
 

@@ -1,7 +1,7 @@
 // See LICENSE for license details.
 
 #include "sim.h"
-#include "htif.h"
+#include "soc.h"
 #include "cachesim.h"
 #include "extension.h"
 #include <dlfcn.h>
@@ -63,8 +63,8 @@ int main(int argc, char** argv)
   auto argv1 = parser.parse(argv);
   if (!*argv1)
     help();
-  std::vector<std::string> htif_args(argv1, (const char*const*)argv + argc);
-  sim_t s(nprocs, mem_mb, htif_args);
+  std::vector<std::string> soc_args(argv1, (const char*const*)argv + argc);
+  sim_t s(nprocs, mem_mb, soc_args);
 
   if (ic && l2) ic->set_miss_handler(&*l2);
   if (dc && l2) dc->set_miss_handler(&*l2);

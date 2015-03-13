@@ -9,13 +9,14 @@
 #include "processor.h"
 #include "mmu.h"
 
-class htif_isasim_t;
+class soc_t;
+//class htif_isasim_t;
 
 // this class encapsulates the processors and memory in a RISC-V machine.
 class sim_t
 {
 public:
-  sim_t(size_t _nprocs, size_t mem_mb, const std::vector<std::string>& htif_args);
+  sim_t(size_t _nprocs, size_t mem_mb, const std::vector<std::string>& soc_args);
   ~sim_t();
 
   // run the simulation to completion
@@ -25,7 +26,9 @@ public:
   void set_debug(bool value);
   void set_histogram(bool value);
   void set_procs_debug(bool value);
-  htif_isasim_t* get_htif() { return htif.get(); }
+  soc_t* get_soc() { return soc.get(); }
+
+  char* get_physmem() { return mem; }
 
   // deliver an IPI to a specific processor
   void send_ipi(reg_t who);
@@ -38,7 +41,7 @@ public:
   reg_t get_scr(int which);
 
 private:
-  std::unique_ptr<htif_isasim_t> htif;
+  std::unique_ptr<soc_t> soc;
   char* mem; // main memory
   size_t memsz; // memory size in bytes
   mmu_t* debug_mmu;  // debug port into main memory
@@ -71,7 +74,8 @@ private:
   reg_t get_pc(const std::vector<std::string>& args);
   reg_t get_tohost(const std::vector<std::string>& args);
 
-  friend class htif_isasim_t;
+  friend class soc_t;
+//  friend class htif_isasim_t;
 };
 
 extern volatile bool ctrlc_pressed;

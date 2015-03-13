@@ -56,6 +56,10 @@ struct state_t
   reg_t scount;
   bool stip;
   uint32_t stimecmp;
+
+  reg_t fifosel;
+  reg_t fifowr;
+
   uint32_t fflags;
   uint32_t frm;
 
@@ -65,6 +69,7 @@ struct state_t
   commit_log_reg_t log_reg_write;
 #endif
 };
+
 
 // this class represents one processor in a RISC-V machine.
 class processor_t

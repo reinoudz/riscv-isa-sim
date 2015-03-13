@@ -1,7 +1,7 @@
 // See LICENSE for license details.
 
 #include "sim.h"
-#include "htif.h"
+#include "soc.h"
 #include <map>
 #include <iostream>
 #include <climits>
@@ -18,8 +18,9 @@ static void handle_signal(int sig)
   signal(sig, &handle_signal);
 }
 
+
 sim_t::sim_t(size_t nprocs, size_t mem_mb, const std::vector<std::string>& args)
-  : htif(new htif_isasim_t(this, args)), procs(std::max(nprocs, size_t(1))),
+  : procs(std::max(nprocs, size_t(1))),
     current_step(0), current_proc(0), debug(false)
 {
   signal(SIGINT, &handle_signal);
@@ -44,7 +45,10 @@ sim_t::sim_t(size_t nprocs, size_t mem_mb, const std::vector<std::string>& args)
     procs[i] = new processor_t(this, new mmu_t(mem, memsz), i);
   }
 
+  /* late initialise the soc to have the cpu's initialised before */
+  soc.reset(new soc_t(this, args));
 }
+
 
 sim_t::~sim_t()
 {
@@ -76,14 +80,14 @@ reg_t sim_t::get_scr(int which)
 
 int sim_t::run()
 {
-  while (htif->tick())
+  while (soc->tick())
   {
     if (debug || ctrlc_pressed)
       interactive();
     else
       step(INTERLEAVE);
   }
-  return htif->exit_code();
+  return 0;
 }
 
 void sim_t::step(size_t n)
@@ -101,7 +105,7 @@ void sim_t::step(size_t n)
       if (++current_proc == procs.size())
         current_proc = 0;
 
-      htif->tick();
+      soc->tick();
     }
   }
 }
@@ -117,7 +121,7 @@ bool sim_t::running()
 void sim_t::stop()
 {
   procs[0]->state.tohost = 1;
-  while (htif->tick())
+  while (soc->tick())
     ;
 }
 

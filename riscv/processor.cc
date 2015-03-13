@@ -5,7 +5,7 @@
 #include "common.h"
 #include "config.h"
 #include "sim.h"
-#include "htif.h"
+#include "soc.h"
 #include "disasm.h"
 #include <cinttypes>
 #include <cmath>
@@ -58,6 +58,11 @@ void state_t::reset()
   mstatus = set_field(mstatus, MSTATUS64_SA, UA_RV64);
 #endif
   pc = 0x100;
+
+/* XXX */
+  fifosel = 0;
+  fifowr = 0;
+
   load_reservation = -1;
 }
 
@@ -404,6 +409,12 @@ void processor_t::set_csr(int which, reg_t val)
         state.tohost = val;
       break;
     case CSR_FROMHOST: state.fromhost = val; break;
+    case CSR_LOWRISC_FIFOSEL:
+      state.fifosel = val;
+      break;
+    case CSR_LOWRISC_FIFOWR:
+      state.fifowr = sim->get_soc()->fifo_wr(id, state.fifosel, val);
+      break;
   }
 }
 
@@ -471,13 +482,21 @@ reg_t processor_t::get_csr(int which)
     case CSR_MCAUSE: return state.mcause;
     case CSR_MBADADDR: return state.mbadaddr;
     case CSR_TOHOST:
-      sim->get_htif()->tick(); // not necessary, but faster
+      sim->get_soc()->tick(); // htif: not necessary, but faster
       return state.tohost;
     case CSR_FROMHOST:
-      sim->get_htif()->tick(); // not necessary, but faster
+      sim->get_soc()->tick(); // htif: not necessary, but faster
       return state.fromhost;
     case CSR_SEND_IPI: return 0;
     case CSR_HARTID: return id;
+    case CSR_LOWRISC_MASTERID:
+      return sim->get_soc()->master_minion_id();
+    case CSR_LOWRISC_FIFOSEL:
+      return state.fifosel;
+    case CSR_LOWRISC_FIFORD:
+      return sim->get_soc()->fifo_rd(id, state.fifosel);
+    case CSR_LOWRISC_FIFOWR:
+      return state.fifowr;
     case CSR_UARCH0:
     case CSR_UARCH1:
     case CSR_UARCH2:
