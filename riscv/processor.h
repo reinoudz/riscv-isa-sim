@@ -59,7 +59,9 @@ struct state_t
 
   reg_t fifosel;
   reg_t fifowr;
-
+  reg_t count;
+  uint32_t compare;
+  uint32_t sr; // only modify the status register using set_pcr()
   uint32_t fflags;
   uint32_t frm;
 

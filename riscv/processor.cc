@@ -63,6 +63,9 @@ void state_t::reset()
   fifosel = 0;
   fifowr = 0;
 
+  fifosel = 0;
+  fifowr = 0;
+
   load_reservation = -1;
 }
 
@@ -487,8 +490,6 @@ reg_t processor_t::get_csr(int which)
     case CSR_FROMHOST:
       sim->get_soc()->tick(); // htif: not necessary, but faster
       return state.fromhost;
-    case CSR_SEND_IPI: return 0;
-    case CSR_HARTID: return id;
     case CSR_LOWRISC_MASTERID:
       return sim->get_soc()->master_minion_id();
     case CSR_LOWRISC_FIFOSEL:
