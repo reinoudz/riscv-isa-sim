@@ -70,6 +70,20 @@ public:
   uint64_t rs3() { return x(27, 5); }
   uint64_t rm() { return x(12, 3); }
   uint64_t csr() { return x(20, 12); }
+
+  int64_t rvc_imm() { return x(2, 5) + (xs(12, 1) << 5); }
+  int64_t rvc_lwsp_imm() { return (x(4, 3) << 2) + (x(12, 1) << 5) + (x(2, 2) << 6); }
+  int64_t rvc_ldsp_imm() { return (x(5, 2) << 3) + (x(12, 1) << 5) + (x(2, 3) << 6); }
+  int64_t rvc_lw_imm() { return (x(5, 2) << 3) + (x(10, 1) << 6) + (x(11, 1) << 2) + (x(12, 1) << 5); }
+  int64_t rvc_ld_imm() { return (x(5, 2) << 3) + (x(10, 1) << 6) + (x(11, 1) << 7) + (x(12, 1) << 5); }
+  int64_t rvc_j_imm() { return (xs(2, 3) << 9) + (x(5, 2) << 3) + (x(7, 1) << 1) + (x(8, 2) << 7) + (x(10, 1) << 6) + (x(11, 1) << 2) + (x(12, 1) << 5); }
+  int64_t rvc_b_imm() { return (x(5, 2) << 3) + (x(7, 1) << 1) + (xs(8, 2) << 7) + (x(10, 1) << 6) + (x(11, 1) << 2) + (x(12, 1) << 5); }
+  uint64_t rvc_rd() { return rd(); }
+  uint64_t rvc_rs1() { return x(2, 5); }
+  uint64_t rvc_rs2() { return rd(); }
+  uint64_t rvc_rds() { return 8 + x(7, 3); }
+  uint64_t rvc_rs1s() { return 8 + x(2, 3); }
+  uint64_t rvc_rs2s() { return rvc_rds(); }
 private:
   insn_bits_t b;
   uint64_t x(int lo, int len) { return (b >> lo) & ((insn_bits_t(1) << len)-1); }
@@ -99,17 +113,27 @@ private:
 #define STATE (*p->get_state())
 #define RS1 STATE.XPR[insn.rs1()]
 #define RS2 STATE.XPR[insn.rs2()]
-#define WRITE_RD(value) STATE.XPR.write(insn.rd(), value)
+#define WRITE_REG(reg, value) STATE.XPR.write(reg, value)
+#define WRITE_RD(value) WRITE_REG(insn.rd(), value)
 
 #ifdef RISCV_ENABLE_COMMITLOG
-  #undef WRITE_RD 
-  #define WRITE_RD(value) ({ \
+  #undef WRITE_REG
+  #define WRITE_REG(reg, value) ({ \
         reg_t wdata = value; /* value is a func with side-effects */ \
-        STATE.log_reg_write = (commit_log_reg_t){insn.rd() << 1, wdata}; \
-        STATE.XPR.write(insn.rd(), wdata); \
+        STATE.log_reg_write = (commit_log_reg_t){reg << 1, wdata}; \
+        STATE.XPR.write(reg, wdata); \
       })
 #endif
 
+// RVC macros
+#define WRITE_RVC_RDS(value) WRITE_REG(insn.rvc_rds(), value)
+#define RVC_RS1 STATE.XPR[insn.rvc_rs1()]
+#define RVC_RS2 STATE.XPR[insn.rvc_rs2()]
+#define RVC_RS1S STATE.XPR[insn.rvc_rs1s()]
+#define RVC_RS2S STATE.XPR[insn.rvc_rs2s()]
+#define RVC_SP STATE.XPR[2]
+
+// FPU macros
 #define FRS1 STATE.FPR[insn.rs1()]
 #define FRS2 STATE.FPR[insn.rs2()]
 #define FRS3 STATE.FPR[insn.rs3()]
@@ -141,10 +165,10 @@ private:
 #define require_privilege(p) if (get_field(STATE.mstatus, MSTATUS_PRV) < (p)) throw trap_illegal_instruction()
 #define require_rv64 if(unlikely(xlen != 64)) throw trap_illegal_instruction()
 #define require_rv32 if(unlikely(xlen != 32)) throw trap_illegal_instruction()
+#define require_extension(s) if (!p->supports_extension(s)) throw trap_illegal_instruction()
 #define require_fp if (unlikely((STATE.mstatus & MSTATUS_FS) == 0)) throw trap_illegal_instruction()
 #define require_accelerator if (unlikely((STATE.mstatus & MSTATUS_XS) == 0)) throw trap_illegal_instruction()
 
-#define cmp_trunc(reg) (reg_t(reg) << (64-xlen))
 #define set_fp_exceptions ({ STATE.fflags |= softfloat_exceptionFlags; \
                              softfloat_exceptionFlags = 0; })
 
@@ -153,9 +177,17 @@ private:
 #define sext_xlen(x) (((sreg_t)(x) << (64-xlen)) >> (64-xlen))
 #define zext_xlen(x) (((reg_t)(x) << (64-xlen)) >> (64-xlen))
 
-#define set_pc(x) (npc = sext_xlen(x))
+#define set_pc(x) \
+  do { if (unlikely(((x) & 2)) && !p->supports_extension('C')) \
+         throw trap_instruction_address_misaligned(x); \
+       npc = sext_xlen(x); \
+     } while(0)
+
+#define PC_SERIALIZE 3 /* sentinel value indicating simulator pipeline flush */
 
 #define validate_csr(which, write) ({ \
+  if (!STATE.serialized) return PC_SERIALIZE; \
+  STATE.serialized = false; \
   unsigned my_priv = get_field(STATE.mstatus, MSTATUS_PRV); \
   unsigned csr_priv = get_field((which), 0x300); \
   unsigned csr_read_only = get_field((which), 0xC00) == 3; \

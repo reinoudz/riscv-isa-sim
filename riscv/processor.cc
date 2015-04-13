@@ -19,12 +19,16 @@
 #undef STATE
 #define STATE state
 
-processor_t::processor_t(sim_t* _sim, mmu_t* _mmu, uint32_t _id)
-  : sim(_sim), mmu(_mmu), ext(NULL), disassembler(new disassembler_t),
-    id(_id), run(false), debug(false), serialized(false)
+processor_t::processor_t(const char* isa, sim_t* sim, uint32_t id)
+  : sim(sim), ext(NULL), disassembler(new disassembler_t),
+    id(id), run(false), debug(false)
 {
-  reset(true);
+  parse_isa_string(isa);
+
+  mmu = new mmu_t(sim->mem, sim->memsz);
   mmu->set_processor(this);
+
+  reset(true);
 
   #define DECLARE_INSN(name, match, mask) REGISTER_INSN(this, name, match, mask)
   #include "encoding.h"
@@ -44,7 +48,54 @@ processor_t::~processor_t()
   }
 #endif
 
+  delete mmu;
   delete disassembler;
+}
+
+static void bad_isa_string(const char* isa)
+{
+  fprintf(stderr, "error: bad --isa option %s\n", isa);
+  abort();
+}
+
+void processor_t::parse_isa_string(const char* isa)
+{
+  const char* p = isa;
+  const char* all_subsets = "IMAFDC";
+
+  max_xlen = 64;
+  if (strncmp(p, "RV32", 4) == 0)
+    max_xlen = 32, p += 4;
+  else if (strncmp(p, "RV64", 4) == 0)
+    p += 4;
+  else if (strncmp(p, "RV", 2) == 0)
+    p += 2;
+
+  if (!*p)
+    p = all_subsets;
+  else if (*p != 'I')
+    bad_isa_string(isa);
+
+  memset(subsets, 0, sizeof(subsets));
+
+  while (*p) {
+    if (auto next = strchr(all_subsets, *p)) {
+      subsets[(int)*p] = true;
+      all_subsets = next + 1;
+      p++;
+    } else if (*p == 'X') {
+      const char* ext = p+1, *end = ext;
+      while (islower(*end))
+        end++;
+      register_extension(find_extension(std::string(ext, end - ext).c_str())());
+      p = end;
+    } else {
+      bad_isa_string(isa);
+    }
+  }
+
+  if (supports_extension('D') && !supports_extension('F'))
+    bad_isa_string(isa);
 }
 
 void state_t::reset()
@@ -53,10 +104,6 @@ void state_t::reset()
   mstatus = set_field(mstatus, MSTATUS_PRV, PRV_M);
   mstatus = set_field(mstatus, MSTATUS_PRV1, PRV_S);
   mstatus = set_field(mstatus, MSTATUS_PRV2, PRV_S);
-#ifdef RISCV_ENABLE_64BIT
-  mstatus = set_field(mstatus, MSTATUS64_UA, UA_RV64);
-  mstatus = set_field(mstatus, MSTATUS64_SA, UA_RV64);
-#endif
   pc = 0x100;
 
 /* XXX */
@@ -87,26 +134,16 @@ void processor_t::reset(bool value)
     return;
   run = !value;
 
-  state.reset(); // reset the core
+  state.reset();
   set_csr(CSR_MSTATUS, state.mstatus);
 
   if (ext)
     ext->reset(); // reset the extension
 }
 
-struct serialize_t {};
-
-void processor_t::serialize()
-{
-  if (serialized)
-    serialized = false;
-  else
-    serialized = true, throw serialize_t();
-}
-
 void processor_t::raise_interrupt(reg_t which)
 {
-  throw trap_t(((reg_t)1 << 63) | which);
+  throw trap_t(((reg_t)1 << (max_xlen-1)) | which);
 }
 
 void processor_t::take_interrupt()
@@ -191,17 +228,28 @@ void processor_t::step(size_t n)
     return;
   n = std::min(n, next_timer(&state) | 1U);
 
+  #define maybe_serialize() \
+   if (unlikely(pc == PC_SERIALIZE)) { \
+     pc = state.pc; \
+     state.serialized = true; \
+     continue; \
+   }
+
   try
   {
     take_interrupt();
 
     if (unlikely(debug))
     {
-      while (instret++ < n)
+      while (instret < n)
       {
         insn_fetch_t fetch = mmu->load_insn(pc);
-        disasm(fetch.insn);
+        if (!state.serialized)
+          disasm(fetch.insn);
         pc = execute_insn(this, pc, fetch);
+        maybe_serialize();
+        instret++;
+        state.pc = pc;
       }
     }
     else while (instret < n)
@@ -213,23 +261,26 @@ void processor_t::step(size_t n)
         insn_fetch_t fetch = ic_entry->data; \
         ic_entry++; \
         pc = execute_insn(this, pc, fetch); \
-        instret++; \
         if (idx == mmu_t::ICACHE_ENTRIES-1) break; \
         if (unlikely(ic_entry->tag != pc)) break; \
+        instret++; \
+        state.pc = pc; \
       }
 
       switch (idx) {
         #include "icache.h"
       }
+
+      maybe_serialize();
+      instret++;
+      state.pc = pc;
     }
   }
   catch(trap_t& t)
   {
-    pc = take_trap(t, pc);
+    state.pc = take_trap(t, pc);
   }
-  catch(serialize_t& s) {}
 
-  state.pc = pc;
   update_timer(&state, instret);
 }
 
@@ -290,20 +341,19 @@ static bool validate_priv(reg_t priv)
   return priv == PRV_U || priv == PRV_S || priv == PRV_M;
 }
 
-static bool validate_arch(reg_t arch)
+static bool validate_arch(int max_xlen, reg_t arch)
 {
-#ifdef RISCV_ENABLE_64BIT
-  if (arch == UA_RV64) return true;
-#endif
+  if (max_xlen == 64 && arch == UA_RV64)
+    return true;
   return arch == UA_RV32;
 }
 
-static bool validate_vm(reg_t vm)
+static bool validate_vm(int max_xlen, reg_t vm)
 {
-  // TODO: VM_SV32 support
-#ifdef RISCV_ENABLE_64BIT
-  if (vm == VM_SV43) return true;
-#endif
+  if (max_xlen == 64 && vm == VM_SV39)
+    return true;
+  if (max_xlen == 32 && vm == VM_SV32)
+    return true;
   return vm == VM_MBARE;
 }
 
@@ -339,15 +389,12 @@ void processor_t::set_csr(int which, reg_t val)
         mmu->flush_tlb();
 
       reg_t mask = MSTATUS_SSIP | MSTATUS_MSIP | MSTATUS_IE | MSTATUS_IE1
-                   | MSTATUS_IE2 | MSTATUS_IE3 | MSTATUS_STIE;
-#ifdef RISCV_ENABLE_FPU
-      mask |= MSTATUS_FS;
-#endif
+                   | MSTATUS_IE2 | MSTATUS_IE3 | MSTATUS_STIE | MSTATUS_FS;
       if (ext)
         mask |= MSTATUS_XS;
       state.mstatus = (state.mstatus & ~mask) | (val & mask);
 
-      if (validate_vm(get_field(val, MSTATUS_VM)))
+      if (validate_vm(max_xlen, get_field(val, MSTATUS_VM)))
         state.mstatus = (state.mstatus & ~MSTATUS_VM) | (val & MSTATUS_VM);
       if (validate_priv(get_field(val, MSTATUS_MPRV)))
         state.mstatus = (state.mstatus & ~MSTATUS_MPRV) | (val & MSTATUS_MPRV);
@@ -359,26 +406,26 @@ void processor_t::set_csr(int which, reg_t val)
         state.mstatus = (state.mstatus & ~MSTATUS_PRV2) | (val & MSTATUS_PRV2);
       if (validate_priv(get_field(val, MSTATUS_PRV3)))
         state.mstatus = (state.mstatus & ~MSTATUS_PRV3) | (val & MSTATUS_PRV3);
-      xlen = 32;
 
       bool dirty = (state.mstatus & MSTATUS_FS) == MSTATUS_FS;
       dirty |= (state.mstatus & MSTATUS_XS) == MSTATUS_XS;
-#ifndef RISCV_ENABLE_64BIT
-      state.mstatus = set_field(state.mstatus, MSTATUS32_SD, dirty);
-#else
-      state.mstatus = set_field(state.mstatus, MSTATUS64_SD, dirty);
+      xlen = 32;
+      if (max_xlen == 32) {
+        state.mstatus = set_field(state.mstatus, MSTATUS32_SD, dirty);
+      } else {
+        state.mstatus = set_field(state.mstatus, MSTATUS64_SD, dirty);
 
-      if (validate_arch(get_field(val, MSTATUS64_UA)))
-        state.mstatus = (state.mstatus & ~MSTATUS64_UA) | (val & MSTATUS64_UA);
-      if (validate_arch(get_field(val, MSTATUS64_SA)))
-        state.mstatus = (state.mstatus & ~MSTATUS64_SA) | (val & MSTATUS64_SA);
-      switch (get_field(state.mstatus, MSTATUS_PRV)) {
-        case PRV_U: if (get_field(state.mstatus, MSTATUS64_UA)) xlen = 64; break;
-        case PRV_S: if (get_field(state.mstatus, MSTATUS64_SA)) xlen = 64; break;
-        case PRV_M: xlen = 64; break;
-        default: abort();
+        if (validate_arch(max_xlen, get_field(val, MSTATUS64_UA)))
+          state.mstatus = (state.mstatus & ~MSTATUS64_UA) | (val & MSTATUS64_UA);
+        if (validate_arch(max_xlen, get_field(val, MSTATUS64_SA)))
+          state.mstatus = (state.mstatus & ~MSTATUS64_SA) | (val & MSTATUS64_SA);
+        switch (get_field(state.mstatus, MSTATUS_PRV)) {
+          case PRV_U: if (get_field(state.mstatus, MSTATUS64_UA)) xlen = 64; break;
+          case PRV_S: if (get_field(state.mstatus, MSTATUS64_SA)) xlen = 64; break;
+          case PRV_M: xlen = 64; break;
+          default: abort();
+        }
       }
-#endif
       break;
     }
     case CSR_SSTATUS:
@@ -397,7 +444,6 @@ void processor_t::set_csr(int which, reg_t val)
     case CSR_SEPC: state.sepc = val; break;
     case CSR_STVEC: state.stvec = val & ~3; break;
     case CSR_STIMECMP:
-      serialize();
       state.stip = false;
       state.stimecmp = val;
       break;
@@ -406,6 +452,7 @@ void processor_t::set_csr(int which, reg_t val)
     case CSR_MEPC: state.mepc = val; break;
     case CSR_MSCRATCH: state.mscratch = val; break;
     case CSR_MCAUSE: state.mcause = val; break;
+    case CSR_MBADADDR: state.mbadaddr = val; break;
     case CSR_SEND_IPI: sim->send_ipi(val); break;
     case CSR_TOHOST:
       if (state.tohost == 0)
@@ -427,12 +474,18 @@ reg_t processor_t::get_csr(int which)
   {
     case CSR_FFLAGS:
       require_fp;
+      if (!supports_extension('F'))
+        break;
       return state.fflags;
     case CSR_FRM:
       require_fp;
+      if (!supports_extension('F'))
+        break;
       return state.frm;
     case CSR_FCSR:
       require_fp;
+      if (!supports_extension('F'))
+        break;
       return (state.fflags << FSR_AEXC_SHIFT) | (state.frm << FSR_RD_SHIFT);
     case CSR_CYCLE:
     case CSR_TIME:
@@ -440,7 +493,6 @@ reg_t processor_t::get_csr(int which)
     case CSR_SCYCLE:
     case CSR_STIME:
     case CSR_SINSTRET:
-      serialize();
       return state.scount;
     case CSR_CYCLEH:
     case CSR_TIMEH:
@@ -450,7 +502,6 @@ reg_t processor_t::get_csr(int which)
     case CSR_SINSTRETH:
       if (xlen == 64)
         break;
-      serialize();
       return state.scount >> 32;
     case CSR_SSTATUS:
     {
@@ -473,8 +524,8 @@ reg_t processor_t::get_csr(int which)
     case CSR_STVEC: return state.stvec;
     case CSR_STIMECMP: return state.stimecmp;
     case CSR_SCAUSE:
-      if (xlen == 32 && (state.scause >> 63) != 0)
-        return state.scause | ((reg_t)1 << 31);
+      if (max_xlen > xlen)
+        return state.scause | ((state.scause >> (max_xlen-1)) << (xlen-1));
       return state.scause;
     case CSR_SPTBR: return state.sptbr;
     case CSR_SASID: return 0;
